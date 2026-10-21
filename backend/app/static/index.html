@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>News Sentiment + Price Reaction Engine</title>
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+  <style>
+    :root { --bg:#0f1419; --panel:#1a222c; --ink:#e6edf3; --muted:#8b98a5; --accent:#4da3ff; --pos:#3fb950; --neg:#f85149; }
+    * { box-sizing: border-box; }
+    body { margin:0; background:var(--bg); color:var(--ink); font-family:system-ui,Segoe UI,Roboto,sans-serif; }
+    header { padding:18px 24px; border-bottom:1px solid #273140; }
+    h1 { margin:0; font-size:20px; } .sub { color:var(--muted); font-size:13px; margin-top:4px; }
+    .grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; padding:16px 24px; }
+    .card { background:var(--panel); border:1px solid #273140; border-radius:10px; padding:14px; }
+    .card h2 { font-size:14px; margin:0 0 10px; color:var(--accent); font-weight:600; }
+    .full { grid-column:1 / -1; }
+    .row { display:flex; gap:10px; align-items:center; margin-bottom:10px; flex-wrap:wrap; }
+    select, button { background:#0d1117; color:var(--ink); border:1px solid #30363d; border-radius:6px; padding:6px 10px; font-size:13px; }
+    button { cursor:pointer; } button:hover { border-color:var(--accent); }
+    .stat { display:inline-block; margin-right:18px; font-size:13px; }
+    .stat b { color:var(--ink); } .stat span { color:var(--muted); }
+    .plot { width:100%; height:320px; }
+    .interactive { display:flex; gap:8px; } input[type=text]{ flex:1; background:#0d1117; color:var(--ink); border:1px solid #30363d; border-radius:6px; padding:8px; }
+    .badge { padding:2px 8px; border-radius:10px; font-size:12px; }
+    .badge.positive{ background:rgba(63,185,80,.15); color:var(--pos);} .badge.negative{ background:rgba(248,81,73,.15); color:var(--neg);} .badge.neutral{ background:rgba(139,152,165,.15); color:var(--muted);}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>News Sentiment + Price Reaction Engine</h1>
+    <div class="sub">Event-study analytics on a reproducible synthetic dataset — abnormal returns, CAAR, sentiment&ndash;return correlation, and decay half-life.</div>
+  </header>
+
+  <div class="grid">
+    <div class="card full">
+      <h2>Try the sentiment scorer + ticker extractor</h2>
+      <div class="interactive">
+        <input id="liveText" type="text" value="Nvidia surges after a strong earnings beat and raised guidance" />
+        <button onclick="runLive()">Analyze</button>
+      </div>
+      <div id="liveOut" style="margin-top:10px;"></div>
+    </div>
+
+    <div class="card full">
+      <h2>Price path with news events</h2>
+      <div id="pricePlot" class="plot"></div>
+    </div>
+
+    <div class="card">
+      <h2>Single-event study</h2>
+      <div class="row">
+        <select id="eventSel" onchange="loadEvent()"></select>
+      </div>
+      <div id="eventStats"></div>
+      <div id="eventPlot" class="plot"></div>
+    </div>
+
+    <div class="card">
+      <h2>CAAR by sentiment sign</h2>
+      <div id="caarStats"></div>
+      <div id="caarPlot" class="plot"></div>
+    </div>
+
+    <div class="card">
+      <h2>Sentiment vs forward CAR</h2>
+      <div id="corrStats"></div>
+      <div id="corrPlot" class="plot"></div>
+    </div>
+
+    <div class="card">
+      <h2>Reaction decay</h2>
+      <div id="decayStats"></div>
+      <div id="decayPlot" class="plot"></div>
+    </div>
+  </div>
+
+<script>
+const LAYOUT = { paper_bgcolor:'transparent', plot_bgcolor:'transparent', font:{color:'#e6edf3',size:11},
+  margin:{l:48,r:16,t:10,b:36}, xaxis:{gridcolor:'#273140',zerolinecolor:'#3a4656'}, yaxis:{gridcolor:'#273140',zerolinecolor:'#3a4656'}, showlegend:true, legend:{orientation:'h'} };
+const CFG = { displayModeBar:false, responsive:true };
+const api = (p) => fetch(p).then(r => r.json());
+
+async function runLive(){
+  const text = document.getElementById('liveText').value;
+  const [s, t] = await Promise.all([
+    fetch('/api/sentiment/score',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})}).then(r=>r.json()),
+    fetch('/api/tickers/extract',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})}).then(r=>r.json()),
+  ]);
+  document.getElementById('liveOut').innerHTML =
+    `<span class="badge ${s.label}">${s.label} &middot; ${s.score}</span>` +
+    `<span class="stat" style="margin-left:14px"><span>tickers:</span> <b>${t.tickers.join(', ')||'none'}</b></span>`;
+}
+
+async function loadOverview(){
+  const d = await api('/api/demo/overview');
+  const dates = d.dates;
+  const price = { x:dates, y:d.asset_prices, name:'Asset', type:'scatter', line:{color:'#4da3ff'} };
+  const mkt = { x:dates, y:d.market_prices, name:'Benchmark', type:'scatter', line:{color:'#8b98a5',dash:'dot'} };
+  const evX = d.events.map(e=>e.date), evY = d.events.map(e=> d.asset_prices[e.ret_index+1]);
+  const evMark = { x:evX, y:evY, name:'News', mode:'markers', type:'scatter',
+    marker:{size:9, color:d.events.map(e=> e.sentiment>=0?'#3fb950':'#f85149'), symbol:'diamond'},
+    text:d.events.map(e=>`${e.ticker}: ${e.headline} (s=${e.sentiment})`), hoverinfo:'text' };
+  Plotly.newPlot('pricePlot',[price,mkt,evMark],LAYOUT,CFG);
+
+  const sel = document.getElementById('eventSel');
+  sel.innerHTML = d.events.map((e,i)=>`<option value="${i}">${e.date} &middot; ${e.ticker} &middot; s=${e.sentiment}</option>`).join('');
+  loadEvent();
+}
+
+async function loadEvent(){
+  const i = document.getElementById('eventSel').value || 0;
+  const r = await api(`/api/demo/event-study?event_number=${i}&pre=1&post=5`);
+  document.getElementById('eventStats').innerHTML =
+    `<span class="stat"><span>CAR:</span> <b>${(r.car*100).toFixed(2)}%</b></span>`+
+    `<span class="stat"><span>t:</span> <b>${r.t_stat.toFixed(2)}</b></span>`+
+    `<span class="stat"><span>p:</span> <b>${r.p_value.toFixed(4)}</b></span>`+
+    `<span class="stat"><span>&beta;:</span> <b>${r.beta.toFixed(2)}</b></span>`;
+  const ar = { x:r.relative_days, y:r.ar.map(v=>v*100), name:'AR %', type:'bar', marker:{color:'#4da3ff'} };
+  const car = { x:r.relative_days, y:r.car_path.map(v=>v*100), name:'CAR %', type:'scatter', yaxis:'y2', line:{color:'#f0a500'} };
+  const lay = Object.assign({}, LAYOUT, { yaxis2:{overlaying:'y',side:'right',gridcolor:'transparent'} });
+  Plotly.newPlot('eventPlot',[ar,car],lay,CFG);
+}
+
+async function loadCaar(){
+  const r = await api('/api/demo/caar?pre=1&post=10');
+  const traces = []; let stat='';
+  if(r.positive){ traces.push({x:r.relative_days,y:r.positive.caar_path.map(v=>v*100),name:'Positive news',type:'scatter',line:{color:'#3fb950'}});
+    stat += `<span class="stat"><span>+ mean CAR:</span> <b>${(r.positive.mean_car*100).toFixed(2)}%</b> (t=${r.positive.t_stat.toFixed(2)}, n=${r.positive.n_events})</span>`; }
+  if(r.negative){ traces.push({x:r.relative_days,y:r.negative.caar_path.map(v=>v*100),name:'Negative news',type:'scatter',line:{color:'#f85149'}});
+    stat += `<span class="stat"><span>&minus; mean CAR:</span> <b>${(r.negative.mean_car*100).toFixed(2)}%</b> (t=${r.negative.t_stat.toFixed(2)}, n=${r.negative.n_events})</span>`; }
+  document.getElementById('caarStats').innerHTML = stat;
+  Plotly.newPlot('caarPlot',traces,LAYOUT,CFG);
+}
+
+async function loadCorr(){
+  const r = await api('/api/demo/correlation?post=5');
+  document.getElementById('corrStats').innerHTML =
+    `<span class="stat"><span>Pearson r:</span> <b>${r.pearson_r.toFixed(3)}</b> (p=${r.pearson_p.toFixed(4)})</span>`+
+    `<span class="stat"><span>Spearman &rho;:</span> <b>${r.spearman_r.toFixed(3)}</b></span>`;
+  const sc = { x:r.sentiment, y:r.car.map(v=>v*100), mode:'markers', type:'scatter', name:'events',
+    marker:{size:9,color:'#4da3ff'} };
+  Plotly.newPlot('corrPlot',[sc],Object.assign({},LAYOUT,{xaxis:{title:'sentiment',gridcolor:'#273140'},yaxis:{title:'CAR(0,5) %',gridcolor:'#273140'},showlegend:false}),CFG);
+}
+
+async function loadDecay(){
+  const r = await api('/api/demo/decay?post=8');
+  const hl = r.fit.half_life;
+  document.getElementById('decayStats').innerHTML =
+    `<span class="stat"><span>decay &lambda;:</span> <b>${r.fit.decay_rate.toFixed(3)}</b></span>`+
+    `<span class="stat"><span>half-life:</span> <b>${isFinite(hl)?hl.toFixed(2)+' days':'&infin;'}</b></span>`;
+  const bars = { x:r.relative_days, y:r.aar_aligned.map(v=>v*100), type:'bar', name:'|AAR| %', marker:{color:'#4da3ff'} };
+  const fit = { x:r.relative_days, y:r.relative_days.map(t=> r.fit.s0*Math.exp(-r.fit.decay_rate*t)*100), name:'fit', type:'scatter', line:{color:'#f0a500'} };
+  Plotly.newPlot('decayPlot',[bars,fit],LAYOUT,CFG);
+}
+
+loadOverview(); loadCaar(); loadCorr(); loadDecay(); runLive();
+</script>
+</body>
+</html>
